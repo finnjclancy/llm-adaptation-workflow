@@ -34,6 +34,7 @@ Public/Proprietary Documents
 |----------|-------|-------------|
 | `00_project_overview.ipynb` | Project overview & setup | Architecture, design decisions, how to adapt |
 | `01_foundation_models.ipynb` | Foundation models & transformers | Transformers, tokenisation, inference, HuggingFace |
+| `01b_neural_networks.ipynb` | Neural networks from scratch | Single neuron, feedforward network, tiny LM trained on financial text, backpropagation |
 | `02_data_preparation.ipynb` | Data preparation | SEC EDGAR ingestion, instruction dataset construction, synthetic data |
 | `03_rag_pipeline.ipynb` | Retrieval-Augmented Generation | Embeddings, vector stores, retrieval, RAG vs fine-tuning |
 | `04_fine_tuning.ipynb` | LoRA fine-tuning | Parameter-efficient fine-tuning, LoRA, Apple Silicon (MPS) |
