@@ -8,3 +8,4 @@ accelerate>=0.29.0
 sentencepiece>=0.2.0
 sentence-transformers>=2.7.0
 rouge-score>=0.1.2
+pypdf>=4.0.0

@@ -21,7 +21,10 @@ model, so fine-tuning one model doesn't clobber another.
 
 from __future__ import annotations
 
+import csv
+import io
 import json
+import re
 import shutil
 import zipfile
 from contextlib import nullcontext
@@ -33,6 +36,9 @@ from typing import Callable, Optional
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 PROCESSED_DIR = DATA_DIR / "processed"
+EXAMPLES_PATH = PROCESSED_DIR / "examples.json"   # instruction dataset (fine-tuning)
+CORPUS_PATH = PROCESSED_DIR / "corpus.json"        # RAG knowledge base (passages)
+META_PATH = PROCESSED_DIR / "meta.json"            # where the dataset came from
 MODELS_DIR = PROJECT_ROOT / "models"
 ADAPTERS_DIR = MODELS_DIR / "adapters"
 
@@ -246,36 +252,229 @@ def estimate_training_label(model_id: str, epochs: int, num_examples: int, devic
     return f"≈ {_fmt_duration(base * 0.65)}–{_fmt_duration(base * 1.5)}"
 
 
-# ── Status helpers ────────────────────────────────────────────────────────────
+# ── Status / metadata helpers ─────────────────────────────────────────────────
 def dataset_exists() -> bool:
-    return (PROCESSED_DIR / "examples.json").exists()
+    return EXAMPLES_PATH.exists()
+
+
+def corpus_exists() -> bool:
+    return CORPUS_PATH.exists()
+
+
+def _write_meta(**fields) -> None:
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    meta = dataset_meta()
+    meta.update(fields)
+    META_PATH.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+
+def dataset_meta() -> dict:
+    if META_PATH.exists():
+        try:
+            return json.loads(META_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def dataset_source() -> str:
+    """'sample', 'qa_upload', or 'none' — where the current Q&A dataset came from."""
+    if not dataset_exists():
+        return "none"
+    return dataset_meta().get("qa_source", "sample")
+
+
+def corpus_count() -> int:
+    if not corpus_exists():
+        return 0
+    try:
+        return len(json.loads(CORPUS_PATH.read_text(encoding="utf-8")))
+    except Exception:
+        return 0
 
 
 # ── 1. Data preparation ───────────────────────────────────────────────────────
 def build_dataset(log: Callable[[str], None] = print) -> dict:
-    """Build the instruction dataset and save it to data/processed/."""
+    """Build the built-in sample instruction dataset and save it to data/processed/."""
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
     examples = [dict(ex) for ex in SEED_EXAMPLES]
     for ex in examples:
         ex["text"] = format_instruction(ex["instruction"], ex["response"], ex.get("context"))
 
-    log(f"Built {len(examples)} instruction examples.")
-    with open(PROCESSED_DIR / "examples.json", "w", encoding="utf-8") as f:
+    log(f"Built {len(examples)} instruction examples (built-in sample).")
+    with open(EXAMPLES_PATH, "w", encoding="utf-8") as f:
         json.dump(examples, f, indent=2)
-    log(f"Saved dataset to {PROCESSED_DIR / 'examples.json'}")
-    return {"count": len(examples), "path": str(PROCESSED_DIR / "examples.json")}
+    _write_meta(qa_source="sample", qa_count=len(examples))
+    log(f"Saved dataset to {EXAMPLES_PATH}")
+    return {"count": len(examples), "path": str(EXAMPLES_PATH)}
 
 
 def load_examples() -> list[dict]:
     if dataset_exists():
-        with open(PROCESSED_DIR / "examples.json", encoding="utf-8") as f:
+        with open(EXAMPLES_PATH, encoding="utf-8") as f:
             return json.load(f)
     return [dict(ex) for ex in SEED_EXAMPLES]
 
 
 def num_examples() -> int:
     return len(load_examples())
+
+
+def sample_questions(n: int = 6) -> list[str]:
+    """A few example questions drawn from the current dataset (for the UI dropdowns)."""
+    out: list[str] = []
+    for ex in load_examples():
+        q = ex.get("instruction")
+        if q and q not in out:
+            out.append(q)
+        if len(out) >= n:
+            break
+    return out
+
+
+def reset_to_sample(log: Callable[[str], None] = print) -> dict:
+    """Discard any uploaded data and restore the built-in sample dataset."""
+    for p in (EXAMPLES_PATH, CORPUS_PATH, META_PATH):
+        if p.exists():
+            p.unlink()
+    log("Cleared uploaded data.")
+    return build_dataset(log=log)
+
+
+# ── 1a. Upload your own Q&A dataset (CSV / JSON) ──────────────────────────────
+# Accepts flexible column/key names so users don't have to match an exact schema.
+_INSTRUCTION_KEYS = ("instruction", "question", "prompt", "input", "query")
+_RESPONSE_KEYS = ("response", "answer", "output", "completion", "label")
+_CONTEXT_KEYS = ("context", "source", "passage", "document", "reference")
+
+
+def _first_present(row: dict, keys) -> Optional[str]:
+    for k in keys:
+        if k in row and str(row[k]).strip():
+            return str(row[k]).strip()
+    return None
+
+
+def parse_qa_records(filename: str, data: bytes) -> list[dict]:
+    """Parse an uploaded CSV or JSON file into instruction/response(/context) records."""
+    name = filename.lower()
+    if name.endswith(".json"):
+        obj = json.loads(data.decode("utf-8"))
+        if isinstance(obj, dict):
+            rows = obj.get("data") or obj.get("examples") or obj.get("rows") or []
+        else:
+            rows = obj
+    elif name.endswith(".csv"):
+        rows = list(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
+    else:
+        raise ValueError("Please upload a .csv or .json file.")
+
+    records = []
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        low = {str(k).strip().lower(): v for k, v in raw.items() if k is not None}
+        instr = _first_present(low, _INSTRUCTION_KEYS)
+        resp = _first_present(low, _RESPONSE_KEYS)
+        ctx = _first_present(low, _CONTEXT_KEYS)
+        if instr and resp:
+            rec = {"instruction": instr, "response": resp}
+            if ctx:
+                rec["context"] = ctx
+            records.append(rec)
+    return records
+
+
+def save_qa_dataset(records: list[dict], log: Callable[[str], None] = print) -> dict:
+    """Validate and save uploaded Q&A records as the instruction dataset."""
+    if not records:
+        raise ValueError(
+            "No usable rows found. Each row needs a question/instruction column and an "
+            "answer/response column (an optional context column is also supported)."
+        )
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    for ex in records:
+        ex["text"] = format_instruction(ex["instruction"], ex["response"], ex.get("context"))
+    with open(EXAMPLES_PATH, "w", encoding="utf-8") as f:
+        json.dump(records, f, indent=2)
+    _write_meta(qa_source="qa_upload", qa_count=len(records))
+    log(f"Saved {len(records)} uploaded Q&A examples.")
+    return {"count": len(records)}
+
+
+def qa_template_csv() -> str:
+    """A small CSV the user can fill in and re-upload."""
+    return (
+        "instruction,response,context\n"
+        '"What is our refund policy?","Customers can request a refund within 30 days of purchase.",'
+        '"Refunds: orders may be returned within 30 days for a full refund."\n'
+        '"Who is the primary contact for billing?","Billing questions go to the finance team at billing@acme.com.",""\n'
+    )
+
+
+# ── 1b. Upload your own documents (TXT / MD / PDF) for RAG ─────────────────────
+def clean_text(raw_text: str) -> str:
+    """Strip HTML, normalise whitespace, drop tiny lines (from notebook 02)."""
+    text = re.sub(r"<[^>]+>", " ", raw_text)
+    text = text.replace("&amp;", "&").replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">")
+    lines = [" ".join(line.split()) for line in text.split("\n")]
+    lines = [line for line in lines if len(line) > 30]
+    text = "\n".join(lines)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def chunk_text(text: str, chunk_size: int = 200, overlap: int = 40) -> list[str]:
+    """Split text into overlapping word-count chunks."""
+    words = text.split()
+    chunks, start = [], 0
+    while start < len(words):
+        end = min(start + chunk_size, len(words))
+        chunks.append(" ".join(words[start:end]))
+        start += max(1, chunk_size - overlap)
+    return chunks
+
+
+def extract_document_text(filename: str, data: bytes) -> str:
+    name = filename.lower()
+    if name.endswith((".txt", ".md", ".markdown", ".text")):
+        return data.decode("utf-8", errors="ignore")
+    if name.endswith(".pdf"):
+        try:
+            import pypdf
+        except ImportError:
+            raise ValueError(
+                f"'{filename}' is a PDF, but PDF support isn't installed. Upload .txt/.md "
+                "files instead, or reinstall the app to enable PDF reading."
+            )
+        reader = pypdf.PdfReader(io.BytesIO(data))
+        return "\n".join((page.extract_text() or "") for page in reader.pages)
+    raise ValueError(f"Unsupported file type: {filename}. Use .txt, .md, or .pdf.")
+
+
+def build_corpus_from_documents(
+    files: list[tuple[str, bytes]],
+    chunk_size: int = 200,
+    overlap: int = 40,
+    log: Callable[[str], None] = print,
+) -> dict:
+    """Extract, clean and chunk uploaded documents into the RAG knowledge base."""
+    passages: list[str] = []
+    for fname, data in files:
+        cleaned = clean_text(extract_document_text(fname, data))
+        chunks = [c for c in chunk_text(cleaned, chunk_size, overlap) if len(c.split()) >= 10]
+        passages.extend(chunks)
+        log(f"{fname}: {len(chunks)} passages")
+
+    if not passages:
+        raise ValueError("No usable text could be extracted from the uploaded documents.")
+
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CORPUS_PATH, "w", encoding="utf-8") as f:
+        json.dump(passages, f, indent=2)
+    _write_meta(corpus_source="document_upload", corpus_count=len(passages))
+    log(f"Built knowledge base of {len(passages)} passages.")
+    return {"count": len(passages)}
 
 
 # ── 2. Fine-tuning (LoRA) ─────────────────────────────────────────────────────
@@ -504,7 +703,19 @@ def _get_embedder():
 
 
 def rag_corpus() -> list[str]:
-    """The knowledge base = the (deduplicated) context passages from the dataset."""
+    """The RAG knowledge base.
+
+    Prefers an uploaded document corpus (corpus.json); otherwise falls back to the
+    deduplicated context passages from the instruction dataset.
+    """
+    if corpus_exists():
+        try:
+            docs = json.loads(CORPUS_PATH.read_text(encoding="utf-8"))
+            if docs:
+                return docs
+        except Exception:
+            pass
+
     seen, docs = set(), []
     for ex in load_examples():
         c = ex.get("context")

@@ -136,37 +136,126 @@ with tab_overview:
 
 # ── Tab: Prepare data ─────────────────────────────────────────────────────────
 with tab_data:
-    st.subheader("Step 1 — Prepare the instruction dataset")
+    st.subheader("Step 1 — Prepare the dataset")
     st.markdown(
-        "Builds the financial Q&A dataset used for both fine-tuning and as the RAG "
-        "knowledge base. In the notebooks this comes from real SEC filings; here a "
-        "representative sample is included so it runs fully offline."
+        "Provide the data the model learns from (for fine-tuning) and answers from "
+        "(for RAG). Use the **built-in sample**, or **upload your own** — your data "
+        "then flows through every other tab automatically."
     )
 
-    if pl.dataset_exists():
-        st.success("Dataset already built.", icon="✅")
+    # Current status
+    src = pl.dataset_source()
+    src_label = {"sample": "Built-in sample", "qa_upload": "Your uploaded Q&A", "none": "Not built yet"}[src]
+    c1, c2 = st.columns(2)
+    c1.metric("Q&A dataset", f"{pl.num_examples()} examples" if pl.dataset_exists() else "—", help=src_label)
+    c1.caption(f"Source: {src_label}")
+    c2.metric("RAG knowledge base", f"{pl.corpus_count()} passages" if pl.corpus_exists() else "from Q&A contexts")
+    c2.caption("Uploaded documents" if pl.corpus_exists() else "Falls back to the Q&A contexts")
 
-    if st.button("Build dataset", type="primary"):
-        logs = st.empty()
-        buffer: list[str] = []
+    st.divider()
+    source_choice = st.radio(
+        "How do you want to provide data?",
+        ["Built-in sample", "Upload Q&A file (for fine-tuning)", "Upload documents (for RAG)"],
+        horizontal=False,
+    )
 
-        def log(msg):
-            buffer.append(msg)
-            logs.code("\n".join(buffer))
-
-        with st.spinner("Building dataset…"):
-            result = pl.build_dataset(log=log)
-        st.success(f"Built {result['count']} examples.", icon="✅")
-
-    if pl.dataset_exists():
-        st.divider()
-        st.markdown("**Preview**")
-        examples = pl.load_examples()
-        st.caption(f"{len(examples)} examples")
-        st.dataframe(
-            [{"instruction": e["instruction"], "response": e["response"]} for e in examples],
-            hide_index=True,
+    # ── Option A: built-in sample ──
+    if source_choice == "Built-in sample":
+        st.caption(
+            "A small financial Q&A set (SEC-filing style) so everything runs offline. "
+            "Good for trying the app before bringing your own data."
         )
+        if st.button("Build sample dataset", type="primary"):
+            with st.spinner("Building…"):
+                result = pl.build_dataset(log=lambda m: None)
+            st.success(f"Built {result['count']} sample examples.", icon="✅")
+            st.rerun()
+
+    # ── Option B: upload Q&A pairs ──
+    elif source_choice == "Upload Q&A file (for fine-tuning)":
+        st.markdown(
+            "Upload a **CSV or JSON** of question/answer pairs. Columns can be named "
+            "`instruction`/`question`/`prompt` and `response`/`answer`/`output`, plus an "
+            "optional `context` column. This becomes the fine-tuning dataset (and its "
+            "`context` values feed RAG if you don't upload documents separately)."
+        )
+        st.download_button(
+            "⬇️ Download a CSV template", pl.qa_template_csv(), "qa_template.csv", "text/csv"
+        )
+        up = st.file_uploader("Q&A file", type=["csv", "json"], key="qa_upload")
+        if up is not None:
+            try:
+                records = pl.parse_qa_records(up.name, up.getvalue())
+                st.info(f"Found **{len(records)}** valid Q&A pairs in `{up.name}`.", icon="🔍")
+                if records:
+                    st.dataframe(
+                        [{"instruction": r["instruction"], "response": r["response"],
+                          "context": r.get("context", "")} for r in records[:20]],
+                        hide_index=True,
+                    )
+                    if len(records) > 20:
+                        st.caption(f"…and {len(records) - 20} more.")
+                    if st.button("Use this dataset", type="primary"):
+                        pl.save_qa_dataset(records, log=lambda m: None)
+                        st.success(f"Saved {len(records)} examples as your dataset.", icon="✅")
+                        st.rerun()
+            except Exception as e:
+                st.error(f"Couldn't read that file: {e}")
+
+    # ── Option C: upload documents for RAG ──
+    else:
+        st.markdown(
+            "Upload **text, Markdown, or PDF** documents. They're split into passages "
+            "and used as the RAG knowledge base, so the model answers grounded in *your* "
+            "documents. (RAG needs no training — go straight to the RAG tab after this.)"
+        )
+        col_cs, col_ov = st.columns(2)
+        chunk_size = col_cs.slider("Passage size (words)", 100, 400, 200, 50)
+        overlap = col_ov.slider("Overlap (words)", 0, 100, 40, 10)
+        ups = st.file_uploader(
+            "Documents", type=["txt", "md", "markdown", "pdf"], accept_multiple_files=True, key="doc_upload"
+        )
+        if ups:
+            if st.button(f"Build knowledge base from {len(ups)} file(s)", type="primary"):
+                logs = st.empty()
+                buffer: list[str] = []
+
+                def log(msg):
+                    buffer.append(msg)
+                    logs.code("\n".join(buffer))
+
+                try:
+                    files = [(f.name, f.getvalue()) for f in ups]
+                    with st.spinner("Extracting and chunking…"):
+                        result = pl.build_corpus_from_documents(
+                            files, chunk_size=chunk_size, overlap=overlap, log=log
+                        )
+                    st.success(f"Built a knowledge base of {result['count']} passages.", icon="✅")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Couldn't process the documents: {e}")
+
+    # ── Reset + preview ──
+    if pl.dataset_exists() or pl.corpus_exists():
+        st.divider()
+        if pl.dataset_source() != "sample" or pl.corpus_exists():
+            if st.button("↩︎ Reset to built-in sample (clears uploads)"):
+                pl.reset_to_sample(log=lambda m: None)
+                st.rerun()
+
+        if pl.dataset_exists():
+            st.markdown("**Q&A dataset preview**")
+            examples = pl.load_examples()
+            st.dataframe(
+                [{"instruction": e["instruction"], "response": e["response"]} for e in examples],
+                hide_index=True,
+            )
+        if pl.corpus_exists():
+            st.markdown("**RAG knowledge base preview**")
+            corpus = pl.rag_corpus()
+            st.caption(f"{len(corpus)} passages")
+            for p in corpus[:5]:
+                st.markdown(f"- {p[:200]}{'…' if len(p) > 200 else ''}")
 
 
 # ── Tab: Fine-tune ────────────────────────────────────────────────────────────
@@ -233,13 +322,8 @@ with tab_chat:
     st.subheader("Step 3 — Ask a question")
     st.markdown("See how the **base** model and the **fine-tuned** model answer the same prompt.")
 
-    examples = [
-        "What was Apple's total net sales in fiscal year 2023?",
-        "How did Microsoft Azure perform in 2023?",
-        "What drove JPMorgan Chase's net income in 2023?",
-        "Summarise Apple's main business risks.",
-    ]
-    picked = st.selectbox("Example questions", ["— type your own —"] + examples, key="chat_pick")
+    examples = pl.sample_questions(6) or ["What was Apple's total net sales in fiscal year 2023?"]
+    picked = st.selectbox("Example questions (from your dataset)", ["— type your own —"] + examples, key="chat_pick")
     default_q = "" if picked == "— type your own —" else picked
     question = st.text_input("Question", value=default_q, placeholder="Ask a financial-analysis question…", key="chat_q")
     temperature = st.slider("Creativity (temperature)", 0.0, 1.0, 0.3, 0.1, key="chat_temp")
@@ -269,13 +353,8 @@ with tab_rag:
         "figures — the model isn't relying on memory. Compare the two columns below."
     )
 
-    rag_examples = [
-        "What was Apple's total net sales in fiscal year 2023?",
-        "How fast did Microsoft Azure grow in fiscal 2023?",
-        "What was JPMorgan Chase's net income in 2023?",
-        "What was Apple's iPhone revenue in fiscal 2023?",
-    ]
-    picked_r = st.selectbox("Example questions", ["— type your own —"] + rag_examples, key="rag_pick")
+    rag_examples = pl.sample_questions(6) or ["What was Apple's total net sales in fiscal year 2023?"]
+    picked_r = st.selectbox("Example questions (from your dataset)", ["— type your own —"] + rag_examples, key="rag_pick")
     default_r = "" if picked_r == "— type your own —" else picked_r
     rag_q = st.text_input("Question", value=default_r, placeholder="Ask about the financial documents…", key="rag_q")
 

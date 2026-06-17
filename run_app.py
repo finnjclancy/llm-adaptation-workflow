@@ -11,6 +11,7 @@ start_mac.command). It:
 Run directly if you prefer:  python run_app.py
 """
 
+import hashlib
 import os
 import subprocess
 import sys
@@ -49,12 +50,15 @@ def main():
 
     py = str(venv_python())
 
-    # 2. Install dependencies once (marker file avoids re-installing every launch)
-    if not INSTALLED_MARKER.exists():
+    # 2. Install dependencies. The marker stores a hash of requirements.txt, so a
+    #    fresh install runs only on first launch or when the requirements change.
+    reqs_hash = hashlib.sha256(REQUIREMENTS.read_bytes()).hexdigest()
+    up_to_date = INSTALLED_MARKER.exists() and INSTALLED_MARKER.read_text().strip() == reqs_hash
+    if not up_to_date:
         print("\nInstalling dependencies — this can take a few minutes the first time…")
         run([py, "-m", "pip", "install", "--upgrade", "pip"])
         run([py, "-m", "pip", "install", "-r", str(REQUIREMENTS)])
-        INSTALLED_MARKER.write_text("ok")
+        INSTALLED_MARKER.write_text(reqs_hash)
     else:
         print("\nDependencies already installed — skipping setup.")
 
