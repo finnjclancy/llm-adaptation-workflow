@@ -87,6 +87,39 @@ jupyter lab
 
 ---
 
+## Local app (no notebooks required)
+
+For a clickable version of the workflow — prepare data, fine-tune, ground answers
+with RAG, compare the base vs fine-tuned model side by side, and download the
+result — there's a local **Streamlit app** in [`app/`](app/). It runs entirely on
+the machine and works on **Windows, macOS, and Linux** (auto-detects CUDA / Apple
+Silicon MPS / CPU).
+
+The app adds a few things over a straight notebook run: a **base-model picker**
+(Qwen2.5 0.5B / TinyLlama 1.1B / Qwen2.5 1.5B / SmolLM2 1.7B), a **live training-time
+estimate** that updates with the chosen model and epochs, and a **RAG tab** that
+retrieves the source passage and answers from it — so figures are correct even
+when the small base model's memory is not.
+
+**For a non-technical user** (e.g. to hand off): just double-click the launcher —
+it creates its own virtual environment and installs everything on first run.
+
+| Platform | Launcher |
+|----------|----------|
+| Windows  | double-click `start_windows.bat` |
+| macOS    | double-click `start_mac.command` |
+| Any      | `python run_app.py` |
+
+The only prerequisite is **Python 3.10+** installed (on Windows, tick *"Add Python
+to PATH"* during install). See [`app/README_FOR_MANAGER.md`](app/README_FOR_MANAGER.md)
+for plain-English instructions to pass along.
+
+The download tab exports the fine-tuned model as a `.zip` containing just the LoRA
+adapter (a few MB) plus a `HOW_TO_LOAD.txt` — the base model is fetched
+automatically when loaded.
+
+---
+
 ## Context
 
 Built to demonstrate the machine learning engineering skills required to adapt foundation models in an enterprise setting — covering the full lifecycle from raw documents through fine-tuning, alignment, and production-readiness evaluation.
