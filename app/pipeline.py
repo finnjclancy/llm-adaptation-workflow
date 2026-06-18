@@ -452,6 +452,22 @@ def extract_document_text(filename: str, data: bytes) -> str:
     raise ValueError(f"Unsupported file type: {filename}. Use .txt, .md, or .pdf.")
 
 
+def passages_from_documents(
+    files: list[tuple[str, bytes]],
+    chunk_size: int = 200,
+    overlap: int = 40,
+    log: Callable[[str], None] = lambda m: None,
+) -> list[str]:
+    """Extract, clean and chunk uploaded documents into passages (not persisted)."""
+    passages: list[str] = []
+    for fname, data in files:
+        cleaned = clean_text(extract_document_text(fname, data))
+        chunks = [c for c in chunk_text(cleaned, chunk_size, overlap) if len(c.split()) >= 10]
+        passages.extend(chunks)
+        log(f"{fname}: {len(chunks)} passages")
+    return passages
+
+
 def build_corpus_from_documents(
     files: list[tuple[str, bytes]],
     chunk_size: int = 200,
@@ -459,13 +475,7 @@ def build_corpus_from_documents(
     log: Callable[[str], None] = print,
 ) -> dict:
     """Extract, clean and chunk uploaded documents into the RAG knowledge base."""
-    passages: list[str] = []
-    for fname, data in files:
-        cleaned = clean_text(extract_document_text(fname, data))
-        chunks = [c for c in chunk_text(cleaned, chunk_size, overlap) if len(c.split()) >= 10]
-        passages.extend(chunks)
-        log(f"{fname}: {len(chunks)} passages")
-
+    passages = passages_from_documents(files, chunk_size, overlap, log)
     if not passages:
         raise ValueError("No usable text could be extracted from the uploaded documents.")
 
@@ -475,6 +485,78 @@ def build_corpus_from_documents(
     _write_meta(corpus_source="document_upload", corpus_count=len(passages))
     log(f"Built knowledge base of {len(passages)} passages.")
     return {"count": len(passages)}
+
+
+# ── 1c. Auto-draft Q&A pairs from passages (LLM-as-teacher, local model) ───────
+# Uses few-shot completion: small local models follow a 'Passage → Q/A' pattern
+# more reliably as a raw completion than as a chat turn. Output is rough — the UI
+# has the user review and edit before saving.
+_QA_FEWSHOT = [
+    (
+        "Acme Corp offers a 30-day money-back guarantee on all hardware purchases, "
+        "no questions asked.",
+        "What is Acme's refund policy on hardware?",
+        "Acme offers a 30-day money-back guarantee on all hardware purchases.",
+    ),
+    (
+        "The customer support team is available Monday to Friday, 9am to 5pm GMT, "
+        "by phone and email.",
+        "When is Acme's customer support available?",
+        "Acme's support team is available Monday to Friday, 9am-5pm GMT, by phone and email.",
+    ),
+]
+
+
+def _qa_completion_prompt(passage: str) -> str:
+    demos = "\n\n".join(f"Passage: {p}\nQ: {q}\nA: {a}" for p, q, a in _QA_FEWSHOT)
+    return (
+        "Write one specific question and a concise, accurate answer based ONLY on "
+        f"each passage.\n\n{demos}\n\nPassage: {passage[:600]}\nQ:"
+    )
+
+
+def _parse_completion_qa(text: str) -> Optional[tuple[str, str]]:
+    """Parse '<question>\\nA: <answer>' out of a completion that followed 'Q:'."""
+    m = re.match(r"\s*(.+?)\n\s*A:\s*(.+)", text, re.S)
+    if not m:
+        return None
+    question = m.group(1).strip().split("\n")[0].strip()
+    answer = m.group(2).strip().split("\n")[0].split("Passage:")[0].strip()
+    if len(question) >= 8 and len(answer) >= 4:
+        return question, answer
+    return None
+
+
+def draft_qa_from_passages(
+    bundle: "ModelBundle",
+    passages: list[str],
+    max_items: int = 8,
+    log: Callable[[str], None] = print,
+    progress: Optional[Callable[[float], None]] = None,
+) -> list[dict]:
+    """Draft instruction/response pairs from passages using the local base model.
+
+    Returns a list of {instruction, response, context} dicts. Unparseable
+    generations are skipped (small models occasionally produce malformed output).
+    """
+    drafts: list[dict] = []
+    n = min(len(passages), max_items)
+    for i, passage in enumerate(passages[:n]):
+        try:
+            out = bundle.complete(_qa_completion_prompt(passage), max_new_tokens=96, temperature=0.7)
+            parsed = _parse_completion_qa(out)
+        except Exception as e:
+            parsed = None
+            log(f"[{i + 1}/{n}] error: {e}")
+        if parsed:
+            q, a = parsed
+            drafts.append({"instruction": q, "response": a, "context": passage})
+            log(f"[{i + 1}/{n}] ✓ {q[:60]}")
+        else:
+            log(f"[{i + 1}/{n}] ✗ skipped (couldn't parse a clean Q/A)")
+        if progress:
+            progress((i + 1) / n)
+    return drafts
 
 
 # ── 2. Fine-tuning (LoRA) ─────────────────────────────────────────────────────
@@ -654,6 +736,27 @@ class ModelBundle:
 
     def generate_finetuned(self, prompt: str, max_new_tokens: int = 160, temperature: float = 0.3) -> str:
         return self.chat(prompt, use_adapter=True, max_new_tokens=max_new_tokens, temperature=temperature)
+
+    def complete(self, prompt: str, max_new_tokens: int = 128, temperature: float = 0.7) -> str:
+        """Raw text completion (no chat template). Used for few-shot data drafting,
+        where small models follow a 'Passage→Q/A' pattern better than a chat turn.
+        Always uses the base model (adapter disabled)."""
+        import torch
+
+        disable = self.has_adapter and hasattr(self.model, "disable_adapter")
+        ctx = self.model.disable_adapter() if disable else nullcontext()
+        inputs = self.tokeniser(prompt, return_tensors="pt").to(self.device)
+        with ctx, torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=temperature > 0,
+                pad_token_id=self.tokeniser.eos_token_id,
+            )
+        return self.tokeniser.decode(
+            outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
+        )
 
 
 def load_model_bundle(model_id: str = DEFAULT_MODEL, log: Callable[[str], None] = print) -> ModelBundle:

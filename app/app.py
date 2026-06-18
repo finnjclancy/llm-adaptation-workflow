@@ -155,7 +155,12 @@ with tab_data:
     st.divider()
     source_choice = st.radio(
         "How do you want to provide data?",
-        ["Built-in sample", "Upload Q&A file (for fine-tuning)", "Upload documents (for RAG)"],
+        [
+            "Built-in sample",
+            "Upload Q&A file (for fine-tuning)",
+            "Upload documents (for RAG)",
+            "Auto-draft Q&A from documents (local model)",
+        ],
         horizontal=False,
     )
 
@@ -203,7 +208,7 @@ with tab_data:
                 st.error(f"Couldn't read that file: {e}")
 
     # ── Option C: upload documents for RAG ──
-    else:
+    elif source_choice == "Upload documents (for RAG)":
         st.markdown(
             "Upload **text, Markdown, or PDF** documents. They're split into passages "
             "and used as the RAG knowledge base, so the model answers grounded in *your* "
@@ -234,6 +239,91 @@ with tab_data:
                     st.rerun()
                 except Exception as e:
                     st.error(f"Couldn't process the documents: {e}")
+
+    # ── Option D: auto-draft Q&A from documents using the local model ──
+    else:
+        st.markdown(
+            "Turn raw documents into **draft question/answer pairs** using the selected "
+            "base model — then **review and edit** them before saving as your fine-tuning "
+            "dataset. This is the *LLM-as-teacher* technique."
+        )
+        st.warning(
+            "Small local models produce **rough drafts** — expect some skipped or "
+            "imperfect pairs. Always check the results before saving. Drafting runs the "
+            "model once per passage, so it's slow on CPU; keep the count low.",
+            icon="⚠️",
+        )
+
+        use_existing = pl.corpus_exists()
+        if use_existing:
+            st.caption(f"Using your existing knowledge base ({pl.corpus_count()} passages).")
+        draft_files = st.file_uploader(
+            "…or upload documents to draft from",
+            type=["txt", "md", "markdown", "pdf"],
+            accept_multiple_files=True,
+            key="draft_upload",
+        )
+        max_items = st.slider("How many passages to draft from", 2, 25, 6, key="draft_n")
+
+        if st.button("Draft Q&A pairs", type="primary", disabled=not (use_existing or draft_files)):
+            progress_bar = st.progress(0.0, text="Loading model…")
+            logs = st.empty()
+            buffer: list[str] = []
+
+            def log(msg):
+                buffer.append(msg)
+                logs.code("\n".join(buffer[-12:]))
+
+            try:
+                if draft_files:
+                    passages = pl.passages_from_documents([(f.name, f.getvalue()) for f in draft_files])
+                else:
+                    passages = pl.rag_corpus()
+                if not passages:
+                    st.error("No passages to draft from. Upload a document first.")
+                else:
+                    bundle = load_current_bundle()
+                    drafts = pl.draft_qa_from_passages(
+                        bundle, passages, max_items=max_items, log=log,
+                        progress=lambda f: progress_bar.progress(min(1.0, f), text=f"Drafting… {f * 100:.0f}%"),
+                    )
+                    progress_bar.progress(1.0, text="Done")
+                    st.session_state["qa_drafts"] = drafts
+                    if not drafts:
+                        st.error("Couldn't draft any clean pairs from these passages. Try more passages or a larger model.")
+            except Exception as e:
+                st.error(f"Drafting failed: {e}")
+                st.exception(e)
+
+        drafts = st.session_state.get("qa_drafts")
+        if drafts:
+            st.success(f"Drafted {len(drafts)} pair(s). Edit below, delete bad rows, then save.", icon="✏️")
+            edited = st.data_editor(
+                drafts,
+                num_rows="dynamic",
+                hide_index=True,
+                column_config={
+                    "instruction": st.column_config.TextColumn("Question", width="medium"),
+                    "response": st.column_config.TextColumn("Answer", width="medium"),
+                    "context": st.column_config.TextColumn("Source passage", width="large"),
+                },
+                key="qa_draft_editor",
+            )
+            if st.button("Save these as my dataset", type="primary"):
+                clean = [
+                    {"instruction": r.get("instruction", "").strip(),
+                     "response": r.get("response", "").strip(),
+                     "context": (r.get("context") or "").strip()}
+                    for r in edited
+                    if r.get("instruction", "").strip() and r.get("response", "").strip()
+                ]
+                try:
+                    pl.save_qa_dataset(clean, log=lambda m: None)
+                    st.session_state.pop("qa_drafts", None)
+                    st.success(f"Saved {len(clean)} examples as your dataset.", icon="✅")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Couldn't save: {e}")
 
     # ── Reset + preview ──
     if pl.dataset_exists() or pl.corpus_exists():
