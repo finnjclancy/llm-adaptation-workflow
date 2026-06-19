@@ -1,6 +1,6 @@
 # How to run the app
 
-This is a small app that teaches a free AI model to answer finance questions. You can run the whole process, chat with the model, and download the finished model, all on your own laptop. Nothing is sent over the internet except a one-time download of the model itself.
+Hi Praveen, this is a small app that teaches a free AI model to answer finance questions. You can run the whole process, chat with the model, and download the finished model, all on your own laptop. Nothing is sent over the internet except a one-time download of the model itself.
 
 You do not need to know any coding to use it.
 

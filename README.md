@@ -91,7 +91,7 @@ To start it, the only thing you need installed first is Python 3.10 or newer. Th
 - On Mac: double-click `start_mac.command`
 - On any system from a terminal: `python run_app.py`
 
-The first launch sets itself up automatically and downloads the model, so it takes a few minutes. After that it is quick. For plain-English, non-technical instructions you can hand to someone else, see [`app/README_FOR_MANAGER.md`](app/README_FOR_MANAGER.md).
+The first launch sets itself up automatically and downloads the model, so it takes a few minutes. After that it is quick. For plain-English, non-technical instructions you can hand to someone else, see [`app/README_FOR_PRAVEEN.md`](app/README_FOR_PRAVEEN.md).
 
 ## The tools used, and why
 
