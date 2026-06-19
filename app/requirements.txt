@@ -1,0 +1,11 @@
+# Dependencies for the local frontend app (leaner than the notebook stack).
+streamlit>=1.36.0
+torch>=2.2.0
+transformers>=4.40.0
+datasets>=2.19.0
+peft>=0.10.0
+accelerate>=0.29.0
+sentencepiece>=0.2.0
+sentence-transformers>=2.7.0
+rouge-score>=0.1.2
+pypdf>=4.0.0

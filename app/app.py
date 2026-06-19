@@ -1,0 +1,557 @@
+"""
+LLM Adaptation Workflow - local frontend.
+
+A clickable version of the notebooks. Launch it with the double-click scripts in
+the project root (start_windows.bat / start_mac.command) - no terminal needed.
+
+Tabs:
+  Overview - what this is, machine readout, base-model picker
+  1 Prepare data - build the instruction dataset
+  2 Fine-tune - train the LoRA adapter (with a live time estimate)
+  3 Chat & compare- base vs fine-tuned, side by side
+  4 RAG (grounded)- retrieve from documents, answer with/without RAG
+  5 Evaluate - benchmark base vs fine-tuned vs RAG
+  6 Download - download the fine-tuned model as a zip
+"""
+
+import sys
+from pathlib import Path
+
+import streamlit as st
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import pipeline as pl # noqa: E402
+
+st.set_page_config(page_title="LLM Adaptation Workflow", page_icon="", layout="wide")
+
+
+# -- Sidebar: base-model picker (shared across all tabs) -----------------------
+def selected_model() -> str:
+    return st.session_state.get("model_id", pl.DEFAULT_MODEL)
+
+
+with st.sidebar:
+    st.header("Settings")
+    model_ids = list(pl.MODELS.keys())
+    st.selectbox(
+        "Base model",
+        options=model_ids,
+        index=model_ids.index(pl.DEFAULT_MODEL),
+        format_func=lambda m: pl.MODELS[m]["label"],
+        key="model_id",
+        help="The open-source model to adapt. Bigger = better answers but slower. "
+        "Each model is fine-tuned and downloaded separately.",
+    )
+    _m = selected_model()
+    st.caption(f"`{_m}` - ~{pl.MODELS[_m]['params_b']}B params")
+    if pl.adapter_exists(_m):
+        st.success("Fine-tuned ", icon="")
+    else:
+        st.info("Not yet fine-tuned", icon="")
+    st.divider()
+    st.caption(f"Compute: **{pl.get_device().upper()}**")
+
+
+# -- Shared helpers ------------------------------------------------------------
+def status_badges():
+    m = selected_model()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Machine", pl.get_device().upper())
+    c2.metric("Dataset", "Ready" if pl.dataset_exists() else "Not built")
+    c3.metric("Fine-tuned", "Ready" if pl.adapter_exists(m) else "Not trained")
+
+
+@st.cache_resource(show_spinner=False)
+def get_bundle(model_id: str, adapter_signature_key: str):
+    """Load (and cache) the model bundle for a given base model. The signature key
+    busts the cache when that model's adapter is created or retrained. Arg names
+    must NOT start with an underscore - Streamlit excludes those from the key."""
+    return pl.load_model_bundle(model_id, log=lambda m: None)
+
+
+def adapter_signature(model_id: str) -> str:
+    if not pl.adapter_exists(model_id):
+        return "base-only"
+    d = pl.adapter_dir(model_id)
+    newest = max((f.stat().st_mtime for f in d.rglob("*") if f.is_file()), default=0)
+    return f"adapter-{newest}"
+
+
+def load_current_bundle():
+    m = selected_model()
+    with st.spinner(f"Loading {pl.MODELS[m]['label']}..."):
+        return get_bundle(m, adapter_signature(m))
+
+
+# -- Header --------------------------------------------------------------------
+st.title("LLM Adaptation Workflow")
+st.caption(
+    "Adapt an open-source language model to the financial domain - prepare data, "
+    "fine-tune with LoRA, ground answers with RAG, compare against the base model, "
+    "and download the result. Everything runs locally on this machine."
+)
+
+tab_overview, tab_data, tab_train, tab_chat, tab_rag, tab_eval, tab_download = st.tabs(
+    [
+        "Overview",
+        "1 - Prepare data",
+        "2 - Fine-tune",
+        "3 - Chat & compare",
+        "4 - RAG (grounded)",
+        "5 - Evaluate",
+        "6 - Download",
+    ]
+)
+
+
+# -- Tab: Overview -------------------------------------------------------------
+with tab_overview:
+    st.subheader("What this does")
+    st.markdown(
+        """
+        This app takes a general-purpose open-source model (pick one in the
+        sidebar) and adapts it to **financial-analysis** questions, then lets you
+        compare before/after and download the result.
+
+        **Two ways to make the model domain-aware - this app does both:**
+        - **Fine-tuning** (tab 2) bakes the domain *style* into the model's weights.
+        - **RAG** (tab 4) retrieves the relevant source passage at question time and
+          grounds the answer in it - best when you need the *exact facts and figures*.
+
+        **Suggested order:** Prepare data -> Fine-tune -> Chat & compare -> RAG -> Evaluate -> Download.
+        """
+    )
+    st.divider()
+    st.subheader("This machine")
+    status_badges()
+    st.info(f"Compute device: **{pl.device_label()}**", icon="")
+    if pl.get_device() == "cpu":
+        st.warning(
+            "No GPU detected. Everything still works, but fine-tuning on CPU is slow. "
+            "Pick the **Qwen2.5 0.5B** model in the sidebar for the quickest run, or skip "
+            "to **RAG** (which needs no training) for accurate answers.",
+            icon="",
+        )
+
+
+# -- Tab: Prepare data ---------------------------------------------------------
+with tab_data:
+    st.subheader("Step 1 - Prepare the dataset")
+    st.markdown(
+        "Provide the data the model learns from (for fine-tuning) and answers from "
+        "(for RAG). Use the **built-in sample**, or **upload your own** - your data "
+        "then flows through every other tab automatically."
+    )
+
+    # Current status
+    src = pl.dataset_source()
+    src_label = {"sample": "Built-in sample", "qa_upload": "Your uploaded Q&A", "none": "Not built yet"}[src]
+    c1, c2 = st.columns(2)
+    c1.metric("Q&A dataset", f"{pl.num_examples()} examples" if pl.dataset_exists() else "-", help=src_label)
+    c1.caption(f"Source: {src_label}")
+    c2.metric("RAG knowledge base", f"{pl.corpus_count()} passages" if pl.corpus_exists() else "from Q&A contexts")
+    c2.caption("Uploaded documents" if pl.corpus_exists() else "Falls back to the Q&A contexts")
+
+    st.divider()
+    source_choice = st.radio(
+        "How do you want to provide data?",
+        [
+            "Built-in sample",
+            "Upload Q&A file (for fine-tuning)",
+            "Upload documents (for RAG)",
+            "Auto-draft Q&A from documents (local model)",
+        ],
+        horizontal=False,
+    )
+
+    # -- Option A: built-in sample --
+    if source_choice == "Built-in sample":
+        st.caption(
+            "A small financial Q&A set (SEC-filing style) so everything runs offline. "
+            "Good for trying the app before bringing your own data."
+        )
+        if st.button("Build sample dataset", type="primary"):
+            with st.spinner("Building..."):
+                result = pl.build_dataset(log=lambda m: None)
+            st.success(f"Built {result['count']} sample examples.", icon="")
+            st.rerun()
+
+    # -- Option B: upload Q&A pairs --
+    elif source_choice == "Upload Q&A file (for fine-tuning)":
+        st.markdown(
+            "Upload a **CSV or JSON** of question/answer pairs. Columns can be named "
+            "`instruction`/`question`/`prompt` and `response`/`answer`/`output`, plus an "
+            "optional `context` column. This becomes the fine-tuning dataset (and its "
+            "`context` values feed RAG if you don't upload documents separately)."
+        )
+        st.download_button(
+            "Download a CSV template", pl.qa_template_csv(), "qa_template.csv", "text/csv"
+        )
+        up = st.file_uploader("Q&A file", type=["csv", "json"], key="qa_upload")
+        if up is not None:
+            try:
+                records = pl.parse_qa_records(up.name, up.getvalue())
+                st.info(f"Found **{len(records)}** valid Q&A pairs in `{up.name}`.", icon="")
+                if records:
+                    st.dataframe(
+                        [{"instruction": r["instruction"], "response": r["response"],
+                          "context": r.get("context", "")} for r in records[:20]],
+                        hide_index=True,
+                    )
+                    if len(records) > 20:
+                        st.caption(f"...and {len(records) - 20} more.")
+                    if st.button("Use this dataset", type="primary"):
+                        pl.save_qa_dataset(records, log=lambda m: None)
+                        st.success(f"Saved {len(records)} examples as your dataset.", icon="")
+                        st.rerun()
+            except Exception as e:
+                st.error(f"Couldn't read that file: {e}")
+
+    # -- Option C: upload documents for RAG --
+    elif source_choice == "Upload documents (for RAG)":
+        st.markdown(
+            "Upload **text, Markdown, or PDF** documents. They're split into passages "
+            "and used as the RAG knowledge base, so the model answers grounded in *your* "
+            "documents. (RAG needs no training - go straight to the RAG tab after this.)"
+        )
+        col_cs, col_ov = st.columns(2)
+        chunk_size = col_cs.slider("Passage size (words)", 100, 400, 200, 50)
+        overlap = col_ov.slider("Overlap (words)", 0, 100, 40, 10)
+        ups = st.file_uploader(
+            "Documents", type=["txt", "md", "markdown", "pdf"], accept_multiple_files=True, key="doc_upload"
+        )
+        if ups:
+            if st.button(f"Build knowledge base from {len(ups)} file(s)", type="primary"):
+                logs = st.empty()
+                buffer: list[str] = []
+
+                def log(msg):
+                    buffer.append(msg)
+                    logs.code("\n".join(buffer))
+
+                try:
+                    files = [(f.name, f.getvalue()) for f in ups]
+                    with st.spinner("Extracting and chunking..."):
+                        result = pl.build_corpus_from_documents(
+                            files, chunk_size=chunk_size, overlap=overlap, log=log
+                        )
+                    st.success(f"Built a knowledge base of {result['count']} passages.", icon="")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Couldn't process the documents: {e}")
+
+    # -- Option D: auto-draft Q&A from documents using the local model --
+    else:
+        st.markdown(
+            "Turn raw documents into **draft question/answer pairs** using the selected "
+            "base model - then **review and edit** them before saving as your fine-tuning "
+            "dataset. This is the *LLM-as-teacher* technique."
+        )
+        st.warning(
+            "Small local models produce **rough drafts** - expect some skipped or "
+            "imperfect pairs. Always check the results before saving. Drafting runs the "
+            "model once per passage, so it's slow on CPU; keep the count low.",
+            icon="",
+        )
+
+        use_existing = pl.corpus_exists()
+        if use_existing:
+            st.caption(f"Using your existing knowledge base ({pl.corpus_count()} passages).")
+        draft_files = st.file_uploader(
+            "...or upload documents to draft from",
+            type=["txt", "md", "markdown", "pdf"],
+            accept_multiple_files=True,
+            key="draft_upload",
+        )
+        max_items = st.slider("How many passages to draft from", 2, 25, 6, key="draft_n")
+
+        if st.button("Draft Q&A pairs", type="primary", disabled=not (use_existing or draft_files)):
+            progress_bar = st.progress(0.0, text="Loading model...")
+            logs = st.empty()
+            buffer: list[str] = []
+
+            def log(msg):
+                buffer.append(msg)
+                logs.code("\n".join(buffer[-12:]))
+
+            try:
+                if draft_files:
+                    passages = pl.passages_from_documents([(f.name, f.getvalue()) for f in draft_files])
+                else:
+                    passages = pl.rag_corpus()
+                if not passages:
+                    st.error("No passages to draft from. Upload a document first.")
+                else:
+                    bundle = load_current_bundle()
+                    drafts = pl.draft_qa_from_passages(
+                        bundle, passages, max_items=max_items, log=log,
+                        progress=lambda f: progress_bar.progress(min(1.0, f), text=f"Drafting... {f * 100:.0f}%"),
+                    )
+                    progress_bar.progress(1.0, text="Done")
+                    st.session_state["qa_drafts"] = drafts
+                    if not drafts:
+                        st.error("Couldn't draft any clean pairs from these passages. Try more passages or a larger model.")
+            except Exception as e:
+                st.error(f"Drafting failed: {e}")
+                st.exception(e)
+
+        drafts = st.session_state.get("qa_drafts")
+        if drafts:
+            st.success(f"Drafted {len(drafts)} pair(s). Edit below, delete bad rows, then save.", icon="")
+            edited = st.data_editor(
+                drafts,
+                num_rows="dynamic",
+                hide_index=True,
+                column_config={
+                    "instruction": st.column_config.TextColumn("Question", width="medium"),
+                    "response": st.column_config.TextColumn("Answer", width="medium"),
+                    "context": st.column_config.TextColumn("Source passage", width="large"),
+                },
+                key="qa_draft_editor",
+            )
+            if st.button("Save these as my dataset", type="primary"):
+                clean = [
+                    {"instruction": r.get("instruction", "").strip(),
+                     "response": r.get("response", "").strip(),
+                     "context": (r.get("context") or "").strip()}
+                    for r in edited
+                    if r.get("instruction", "").strip() and r.get("response", "").strip()
+                ]
+                try:
+                    pl.save_qa_dataset(clean, log=lambda m: None)
+                    st.session_state.pop("qa_drafts", None)
+                    st.success(f"Saved {len(clean)} examples as your dataset.", icon="")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Couldn't save: {e}")
+
+    # -- Reset + preview --
+    if pl.dataset_exists() or pl.corpus_exists():
+        st.divider()
+        if pl.dataset_source() != "sample" or pl.corpus_exists():
+            if st.button("Reset to built-in sample (clears uploads)"):
+                pl.reset_to_sample(log=lambda m: None)
+                st.rerun()
+
+        if pl.dataset_exists():
+            st.markdown("**Q&A dataset preview**")
+            examples = pl.load_examples()
+            st.dataframe(
+                [{"instruction": e["instruction"], "response": e["response"]} for e in examples],
+                hide_index=True,
+            )
+        if pl.corpus_exists():
+            st.markdown("**RAG knowledge base preview**")
+            corpus = pl.rag_corpus()
+            st.caption(f"{len(corpus)} passages")
+            for p in corpus[:5]:
+                st.markdown(f"- {p[:200]}{'...' if len(p) > 200 else ''}")
+
+
+# -- Tab: Fine-tune ------------------------------------------------------------
+with tab_train:
+    m = selected_model()
+    st.subheader("Step 2 - Fine-tune with LoRA")
+    st.markdown(
+        f"Trains a small **LoRA adapter** on top of **{pl.MODELS[m]['label']}** "
+        "(change it in the sidebar). Only ~0.5% of the parameters are updated, which "
+        "is what makes this possible on a laptop."
+    )
+
+    col_a, col_b, col_c = st.columns(3)
+    epochs = col_a.slider("Epochs", 1, 8, 3, help="Full passes over the data. More = stronger adaptation, slower.")
+    lora_r = col_b.select_slider("LoRA rank", options=[4, 8, 16, 32], value=16, help="Adapter capacity.")
+    lr = col_c.select_slider("Learning rate", options=[1e-4, 2e-4, 3e-4], value=2e-4, format_func=lambda x: f"{x:.0e}")
+
+    # Live training-time estimate - updates as the model/epoch sliders change.
+    n_ex = pl.num_examples()
+    est = pl.estimate_training_label(m, epochs, n_ex, pl.get_device())
+    st.info(
+        f"**Estimated training time: {est}** "
+        f"({epochs} epoch(s) x {n_ex} examples on {pl.get_device().upper()}). "
+        "Rough guide; the first run also downloads the model one time.",
+        icon="",
+    )
+
+    if pl.adapter_exists(m):
+        st.warning("This model already has a fine-tuned adapter. Training again overwrites it.", icon="")
+    if not pl.dataset_exists():
+        st.warning("No dataset yet - it will be built automatically before training.", icon="")
+
+    if st.button("Start fine-tuning", type="primary"):
+        progress_bar = st.progress(0.0, text="Starting...")
+        logs = st.empty()
+        buffer: list[str] = []
+
+        def log(msg):
+            buffer.append(msg)
+            logs.code("\n".join(buffer[-25:]))
+
+        def progress(frac):
+            progress_bar.progress(min(1.0, frac), text=f"Training... {frac * 100:.0f}%")
+
+        try:
+            result = pl.run_finetuning(
+                model_id=m, epochs=epochs, learning_rate=float(lr), lora_r=lora_r, log=log, progress=progress
+            )
+            progress_bar.progress(1.0, text="Done")
+            st.success(
+                f"Fine-tuning complete. Final loss {result['final_loss']:.4f}, "
+                f"adapter size {result['size_mb']:.1f} MB.",
+                icon="",
+            )
+            st.cache_resource.clear() # force reload with the new adapter
+            st.balloons()
+        except Exception as e:
+            st.error(f"Training failed: {e}")
+            st.exception(e)
+
+
+# -- Tab: Chat & compare -------------------------------------------------------
+with tab_chat:
+    st.subheader("Step 3 - Ask a question")
+    st.markdown("See how the **base** model and the **fine-tuned** model answer the same prompt.")
+
+    examples = pl.sample_questions(6) or ["What was Apple's total net sales in fiscal year 2023?"]
+    picked = st.selectbox("Example questions (from your dataset)", ["- type your own -"] + examples, key="chat_pick")
+    default_q = "" if picked == "- type your own -" else picked
+    question = st.text_input("Question", value=default_q, placeholder="Ask a financial-analysis question...", key="chat_q")
+    temperature = st.slider("Creativity (temperature)", 0.0, 1.0, 0.3, 0.1, key="chat_temp")
+
+    if st.button("Generate answers", type="primary", disabled=not question.strip()):
+        bundle = load_current_bundle()
+        col_base, col_ft = st.columns(2)
+        with col_base:
+            st.markdown("#### Base model")
+            with st.spinner("Generating..."):
+                st.write(bundle.generate_base(question, temperature=temperature))
+        with col_ft:
+            st.markdown("#### Fine-tuned model")
+            if bundle.has_adapter:
+                with st.spinner("Generating..."):
+                    st.write(bundle.generate_finetuned(question, temperature=temperature))
+            else:
+                st.info("No fine-tuned model yet - run **Fine-tune** first to compare.", icon="")
+
+
+# -- Tab: RAG ------------------------------------------------------------------
+with tab_rag:
+    st.subheader("Step 4 - RAG: answers grounded in the documents")
+    st.markdown(
+        "RAG retrieves the most relevant source passage for your question and makes "
+        "the model answer **using only that passage**. This is how you get accurate "
+        "figures - the model isn't relying on memory. Compare the two columns below."
+    )
+
+    rag_examples = pl.sample_questions(6) or ["What was Apple's total net sales in fiscal year 2023?"]
+    picked_r = st.selectbox("Example questions (from your dataset)", ["- type your own -"] + rag_examples, key="rag_pick")
+    default_r = "" if picked_r == "- type your own -" else picked_r
+    rag_q = st.text_input("Question", value=default_r, placeholder="Ask about the financial documents...", key="rag_q")
+
+    col_k, col_ft = st.columns(2)
+    k = col_k.slider("Passages to retrieve (top-k)", 1, 5, 3, key="rag_k")
+    use_ft = col_ft.toggle(
+        "Use fine-tuned model", value=pl.adapter_exists(selected_model()), key="rag_use_ft",
+        help="Combine RAG with your fine-tuned model. Off = base model.",
+    )
+
+    if st.button("Answer with RAG", type="primary", disabled=not rag_q.strip()):
+        bundle = load_current_bundle()
+
+        st.markdown("##### Retrieved sources")
+        sources = pl.rag_retrieve(rag_q, k=k)
+        for i, s in enumerate(sources, 1):
+            st.markdown(f"**[{i}]** _(similarity {s['score']:.2f})_ {s['text']}")
+
+        st.divider()
+        col_no, col_yes = st.columns(2)
+        with col_no:
+            st.markdown("#### Without RAG (model memory)")
+            st.caption("The model answers from what it memorised - may be wrong.")
+            with st.spinner("Generating..."):
+                st.write(bundle.chat(rag_q, use_adapter=use_ft and bundle.has_adapter, temperature=0.2))
+        with col_yes:
+            st.markdown("#### With RAG (grounded in sources)")
+            st.caption("The model answers using only the retrieved passages.")
+            with st.spinner("Generating..."):
+                answer, _ = pl.rag_answer(bundle, rag_q, k=k, use_adapter=use_ft and bundle.has_adapter)
+                st.write(answer)
+
+
+# -- Tab: Evaluate -------------------------------------------------------------
+with tab_eval:
+    st.subheader("Step 5 - Evaluate")
+    st.markdown(
+        "Runs held-out benchmark questions through the models and scores a simple "
+        "**fact-match** (did the answer contain the right figures). Compares base, "
+        "fine-tuned, and RAG."
+    )
+    include_rag = st.toggle("Include RAG in the comparison", value=True, key="eval_rag")
+
+    if st.button("Run evaluation", type="primary"):
+        bundle = load_current_bundle()
+        logs = st.empty()
+        buffer: list[str] = []
+
+        def log(msg):
+            buffer.append(msg)
+            logs.code("\n".join(buffer[-8:]))
+
+        with st.spinner("Evaluating..."):
+            results = pl.evaluate(bundle, include_rag=include_rag, log=log)
+        logs.empty()
+
+        summary = results["summary"]
+        cols = st.columns(len(summary))
+        labels = {"base_factmatch": "Base", "ft_factmatch": "Fine-tuned", "rag_factmatch": "RAG"}
+        base_val = summary["base_factmatch"]
+        for col, (key, val) in zip(cols, summary.items()):
+            delta = None if key == "base_factmatch" else f"{(val - base_val) * 100:+.0f} pts"
+            col.metric(labels.get(key, key), f"{val * 100:.0f}%", delta=delta)
+
+        st.divider()
+        for r in results["rows"]:
+            with st.expander(r["question"]):
+                st.caption(f"Reference: {r['reference']}")
+                st.markdown("** Base**")
+                st.write(r["base_answer"])
+                if "ft_answer" in r:
+                    st.markdown("** Fine-tuned**")
+                    st.write(r["ft_answer"])
+                if "rag_answer" in r:
+                    st.markdown("** RAG**")
+                    st.write(r["rag_answer"])
+
+
+# -- Tab: Download -------------------------------------------------------------
+with tab_download:
+    m = selected_model()
+    st.subheader("Step 6 - Download the fine-tuned model")
+    st.markdown(
+        "Packages the fine-tuned model as a single zip. It's small because it contains "
+        "only the trained **LoRA adapter** - the base model downloads automatically when "
+        "loaded. A `HOW_TO_LOAD.txt` with example code is included inside."
+    )
+    st.caption(f"Currently selected model: **{pl.MODELS[m]['label']}**")
+
+    if not pl.adapter_exists(m):
+        st.info("Nothing to download for this model yet - run **Fine-tune** first.", icon="")
+    else:
+        if st.button("Package model for download", type="primary"):
+            with st.spinner("Zipping..."):
+                zip_path = pl.package_adapter(m)
+            st.session_state["zip_path"] = str(zip_path)
+
+        if st.session_state.get("zip_path"):
+            zip_path = Path(st.session_state["zip_path"])
+            if zip_path.exists():
+                size_mb = zip_path.stat().st_size / 1e6
+                with open(zip_path, "rb") as f:
+                    st.download_button(
+                        "Download fine-tuned model (.zip)",
+                        data=f,
+                        file_name=zip_path.name,
+                        mime="application/zip",
+                        type="primary",
+                    )
+                st.caption(f"{zip_path.name} - {size_mb:.1f} MB")

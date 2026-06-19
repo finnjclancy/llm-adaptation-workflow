@@ -73,6 +73,26 @@ jupyter lab
 
 Then open the `notebooks` folder and start with `00_project_overview`.
 
+## Running it as a clickable app (no notebooks needed)
+
+If you would rather not touch the notebooks, there is a small app in the `app/` folder that does the whole thing through a normal point-and-click screen. It runs entirely on your own machine and works on Windows, Mac, and Linux. It works out by itself whether to use an NVIDIA GPU, Apple Silicon, or just the CPU.
+
+What the app lets you do:
+
+- Pick which base model to use, from a small fast one up to a larger, slower, more capable one.
+- Build the dataset, fine-tune the model, and watch a live estimate of how long training will take.
+- Chat with the original model and the fine-tuned model side by side to compare them.
+- Use the RAG tab to get answers grounded in the source documents, so the figures are correct.
+- Download the finished model as a zip when you are done.
+
+To start it, the only thing you need installed first is Python 3.10 or newer. Then:
+
+- On Windows: double-click `start_windows.bat`
+- On Mac: double-click `start_mac.command`
+- On any system from a terminal: `python run_app.py`
+
+The first launch sets itself up automatically and downloads the model, so it takes a few minutes. After that it is quick. For plain-English, non-technical instructions you can hand to someone else, see [`app/README_FOR_MANAGER.md`](app/README_FOR_MANAGER.md).
+
 ## The tools used, and why
 
 - **PyTorch**: the engine that runs the model and does the training maths. It is the standard choice.

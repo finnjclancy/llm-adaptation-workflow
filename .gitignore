@@ -1,0 +1,14 @@
+# Virtual environment created by the app launcher
+.venv/
+
+# Downloaded data and trained models (large, regenerated locally)
+data/
+models/
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
