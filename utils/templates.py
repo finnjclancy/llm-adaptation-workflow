@@ -3,7 +3,7 @@ Instruction templates used across notebooks.
 Swap these out to adapt the workflow to your domain.
 """
 
-# ── Financial domain (default) ──────────────────────────────────────────────
+# Financial domain (the default). To use a different domain, edit the strings below.
 
 SYSTEM_PROMPT = """You are a financial analyst assistant with expertise in
 SEC filings, earnings reports, and corporate financial statements. Answer
@@ -24,7 +24,7 @@ INSTRUCTION_TEMPLATE_NO_CONTEXT = """### Instruction:
 ### Response:
 {response}"""
 
-# ── Adapt This — swap for your domain ───────────────────────────────────────
+# Adapt this: swap the system prompt for your own area. A few examples:
 #
 # Example: Legal domain
 # SYSTEM_PROMPT = "You are a legal assistant specialising in contract review..."

@@ -1,94 +1,97 @@
-# LLM Adaptation Workflow — Enterprise AI Pipeline
+# Teaching a Language Model About Finance
 
-A complete, end-to-end workflow for adapting open-source foundation models to proprietary knowledge domains. Built to run on Apple Silicon (M-series Mac) using public data, but designed so any team can swap in their own domain corpus and fine-tune a model to their specific use case.
+This project takes a small, free, open-source AI language model and teaches it to answer questions about company finances. It starts with a general model that knows a little about everything, and ends with a model that has been trained on financial documents, given the ability to look up facts, and properly tested.
 
----
+The whole thing is built as a series of Jupyter notebooks. Each notebook is one step, runs on its own, and explains what it is doing and why as it goes.
 
-## What this project demonstrates
+## Who this is for
 
-Starting from a general-purpose language model and ending with a domain-adapted model that has been instruction-tuned, retrieval-augmented, aligned to preferences, and rigorously evaluated.
+You do not need a machine learning background to follow along. If you can read Python and you are curious about how tools like ChatGPT are built and customised, you will be fine. Every notebook is written to be read top to bottom like a short lesson.
+
+## Why I built it this way
+
+There are two normal reasons a company cannot just use ChatGPT off the shelf:
+
+- Their data is private and cannot be sent to an outside company
+- The model does not know their specific documents, products, or numbers
+
+The fix is to take a model you are allowed to run yourself, and adapt it to your own information. This project shows the full process of doing exactly that, using public financial filings as a stand-in for a company's private documents. Swap in your own documents and the same steps apply.
+
+## The steps, start to finish
 
 ```
-Public/Proprietary Documents
-         │
-         ▼
-  02 · Data Preparation        ← Convert raw documents into training datasets
-         │
-    ┌────┴────┐
-    ▼         ▼
-03 · RAG   04 · Fine-Tuning    ← Two adaptation paths (choose one or combine)
-    │         │
-    └────┬────┘
-         ▼
-  05 · Alignment               ← DPO preference optimisation
-         │
-         ▼
-  06 · Evaluation              ← Benchmark before vs after
+Company documents (here: public SEC filings)
+        |
+        v
+  02 - Data Preparation      turn raw documents into training material
+        |
+   -----+-----
+   |         |
+   v         v
+ 03 RAG    04 Fine-Tuning     two ways to adapt the model (use one or both)
+   |         |
+   -----+-----
+        |
+        v
+  05 - Alignment             nudge the model toward better answers
+        |
+        v
+  06 - Evaluation            measure whether any of it actually helped
 ```
 
----
+## The notebooks
 
-## Notebooks
+Run them in order the first time. After that you can jump around.
 
-| Notebook | Topic | Key concepts |
-|----------|-------|-------------|
-| `00_project_overview.ipynb` | Project overview & setup | Architecture, design decisions, how to adapt |
-| `01_foundation_models.ipynb` | Foundation models & transformers | Transformers, tokenisation, inference, HuggingFace |
-| `01b_neural_networks.ipynb` | Neural networks from scratch | Single neuron, feedforward network, tiny LM trained on financial text, backpropagation |
-| `02_data_preparation.ipynb` | Data preparation | SEC EDGAR ingestion, instruction dataset construction, synthetic data |
-| `03_rag_pipeline.ipynb` | Retrieval-Augmented Generation | Embeddings, vector stores, retrieval, RAG vs fine-tuning |
-| `04_fine_tuning.ipynb` | LoRA fine-tuning | Parameter-efficient fine-tuning, LoRA, Apple Silicon (MPS) |
-| `05_alignment.ipynb` | Preference alignment | DPO, preference datasets, reward model concepts |
-| `06_evaluation.ipynb` | Evaluation & benchmarking | ROUGE, BERTScore, hallucination detection, before/after |
+| Notebook | What it covers | Why it matters |
+|----------|----------------|----------------|
+| `00_project_overview` | The big picture and how to adapt it | So you know where you are going before you start |
+| `01_foundation_models` | What a language model is and how to run one | You cannot adapt a model until you can load and talk to one |
+| `01b_neural_networks` | A neural network built from scratch | Shows the simple idea underneath all the fancy libraries |
+| `02_data_preparation` | Turning documents into training examples | A model is only as good as the data you feed it |
+| `03_rag_pipeline` | Letting the model look facts up | The most reliable way to stop a model making things up |
+| `04_fine_tuning` | Training the model on your data (LoRA) | Changes how the model writes and behaves |
+| `05_alignment` | Teaching it which answers are better (DPO) | Two technically-correct answers are not equally good |
+| `06_evaluation` | Scoring the model before and after | Without this you are just guessing whether it worked |
 
----
+## What you need to run it
 
-## Tech stack
+- A Mac with an Apple Silicon chip (M1, M2, M3 or newer). I built and tested it on one.
+- 8 GB of memory at a minimum, 16 GB is more comfortable.
+- No separate graphics card needed. The notebooks use Apple's built-in GPU, which keeps the cost at zero.
 
-| Layer | Tools |
-|-------|-------|
-| Models | HuggingFace Transformers, `TinyLlama-1.1B`, `Phi-2` |
-| Training | PyTorch (MPS backend), `peft`, `trl` |
-| RAG | `sentence-transformers`, `faiss-cpu`, `langchain` |
-| Data | `datasets`, `sec-edgar-downloader`, `pandas` |
-| Evaluation | `evaluate`, `bert_score`, `rouge_score` |
+If you are on a different machine, the notebooks also run on Google Colab's free tier. Each one notes the small change you need to make.
 
----
-
-## Hardware requirements
-
-Designed and tested on **Apple Silicon M-series Mac** (8 GB RAM minimum, 16 GB recommended).  
-Uses the MPS (Metal Performance Shaders) backend for PyTorch — no GPU required.
-
-For cloud alternatives: Google Colab T4 (free tier) works with minor `device` changes noted in each notebook.
-
----
-
-## How to adapt this to your domain
-
-Every notebook has a clearly labelled **"Adapt This"** section. To use your own domain:
-
-1. **Swap the corpus** — replace SEC filings in `02_data_preparation.ipynb` with your documents (PDFs, HTML, plain text)
-2. **Update the instruction template** — edit `utils/templates.py` to reflect your task type
-3. **Adjust the evaluation questions** — replace the financial Q&A benchmark in `06_evaluation.ipynb` with domain-relevant questions
-
-The rest of the pipeline runs unchanged.
-
----
-
-## Setup
+## Getting set up
 
 ```bash
-git clone https://github.com/clancyfi/llm-adaptation-workflow
+git clone https://github.com/finnjclancy/llm-adaptation-workflow
 cd llm-adaptation-workflow
 pip install -r requirements.txt
 jupyter lab
 ```
 
----
+Then open the `notebooks` folder and start with `00_project_overview`.
 
-## Context
+## The tools used, and why
 
-Built to demonstrate the machine learning engineering skills required to adapt foundation models in an enterprise setting — covering the full lifecycle from raw documents through fine-tuning, alignment, and production-readiness evaluation.
+- **PyTorch**: the engine that runs the model and does the training maths. It is the standard choice.
+- **Hugging Face Transformers**: a library that lets you download and run free models in a few lines. The model I used, TinyLlama, comes from here.
+- **peft**: handles the efficient training method (LoRA), so training fits on a laptop instead of needing a server.
+- **trl**: handles the alignment step.
+- **sentence-transformers**: turns text into numbers so the model can search documents by meaning, not just keywords.
+- **evaluate, rouge-score, bert-score**: the scoring tools used in the testing step.
 
-Domain used: **financial services** (SEC filings, earnings reports) — representative of work performed at Data & AI consultancies, hedge funds, and AI research teams in regulated industries.
+## Making this work for your own documents
+
+Every notebook has a short section marked "Adapt This". To point it at your own area instead of finance:
+
+1. Replace the SEC filings in `02_data_preparation` with your own files (PDFs, web pages, or plain text).
+2. Edit the question templates in `utils/templates.py` to match the kind of task you care about.
+3. Swap the test questions in `06_evaluation` for ones about your documents.
+
+Everything in between runs the same way.
+
+## A note on the data
+
+I used public financial filings from the US SEC, things like annual reports and earnings figures. That keeps the project legal to share and easy to check, while still looking like the kind of work a bank, fund, or consultancy would actually want done on their private data.
